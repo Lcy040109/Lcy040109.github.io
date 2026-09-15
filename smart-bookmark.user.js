@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         智能收藏 Smart Bookmark
 // @namespace    smart-bookmark
-// @version      0.2.1
-// @description  统一界面修复：我的收藏可打开、单条删除、重复收藏一键清理；检测到CRX时操作浏览器原生收藏夹
+// @version      0.2.2
+// @description  星按钮可自由拖动、自动吸附左右边缘、闲置半隐藏；保留智能收藏全部功能
 // @match        http://*/*
 // @match        https://*/*
 // @grant        GM_setValue
@@ -12,65 +12,179 @@
 // @grant        GM_xmlhttpRequest
 // @connect      ghtnniublwkejociyedh.supabase.co
 // @connect      *
+// @require      https://raw.githubusercontent.com/Lcy040109/Lcy040109.github.io/6d6dd8e12931d2355a30be12793e649ebdc1cc23/smart-bookmark.user.js
 // @run-at       document-idle
 // ==/UserScript==
 
-(function(){
-'use strict';
-const BASE='https://ghtnniublwkejociyedh.supabase.co';
-const KEY='sb_publishable_kHazDpnWtpuWZgeW7ggODg_4z6b2TCq';
-const CATS=['AI工具','网络与路由','开发与代码','服务器与云服务','手机与软件','社交与通讯','视频与音乐','购物与电商','学习与资料','云盘与存储','办公与效率','设计与图片','新闻与资讯','生活与服务','网站与服务'];
-const $=(s,r=document)=>r.querySelector(s);
-const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+(function () {
+  'use strict';
 
-function request({method='GET',url,headers={},body,timeout=30000}){
-  return new Promise((resolve,reject)=>GM_xmlhttpRequest({method,url,headers,data:body?JSON.stringify(body):undefined,timeout,
-    onload:r=>{let d=r.responseText;try{d=d?JSON.parse(d):null}catch{};if(r.status>=200&&r.status<300)resolve(d);else reject(new Error(`${r.status} ${d?.message||d?.msg||d?.error||r.responseText||'请求失败'}`));},
-    onerror:()=>reject(new Error('网络请求失败')),ontimeout:()=>reject(new Error('请求超时'))}));
-}
-async function session(){
-  let s=GM_getValue('sb_session',null);if(!s)return null;
-  if((s.expires_at||0)<=Date.now()/1000+60){
-    try{const d=await request({method:'POST',url:`${BASE}/auth/v1/token?grant_type=refresh_token`,headers:{apikey:KEY,'Content-Type':'application/json'},body:{refresh_token:s.refresh_token}});s={access_token:d.access_token,refresh_token:d.refresh_token,expires_at:Math.floor(Date.now()/1000)+Number(d.expires_in||3600),user:d.user||s.user};GM_setValue('sb_session',s);}catch{GM_deleteValue('sb_session');return null;}
-  }return s;
-}
-async function login(email,password){const d=await request({method:'POST',url:`${BASE}/auth/v1/token?grant_type=password`,headers:{apikey:KEY,'Content-Type':'application/json'},body:{email,password}});const s={access_token:d.access_token,refresh_token:d.refresh_token,expires_at:Math.floor(Date.now()/1000)+Number(d.expires_in||3600),user:d.user};GM_setValue('sb_session',s);return s}
-async function register(email,password){return request({method:'POST',url:`${BASE}/auth/v1/signup`,headers:{apikey:KEY,'Content-Type':'application/json'},body:{email,password}})}
-async function rest(path,{method='GET',query={},body,headers={}}={}){const s=await session();if(!s)throw new Error('请先登录');const u=new URL(`${BASE}/rest/v1/${path}`);Object.entries(query).forEach(([k,v])=>u.searchParams.set(k,v));return request({method,url:u.toString(),headers:{apikey:KEY,Authorization:`Bearer ${s.access_token}`,'Content-Type':'application/json',...headers},body})}
+  const POS_KEY = 'sbu_fab_pos_v1';
+  const IDLE_MS = 2200;
 
-let bridgeSeq=0;
-function bridge(action,payload={},timeout=1600){return new Promise(resolve=>{const id='sb-'+Date.now()+'-'+(++bridgeSeq);let done=false;const h=e=>{if(e.source!==window||e.data?.source!=='smart-bookmark-crx'||e.data?.id!==id)return;done=true;window.removeEventListener('message',h);resolve(e.data)};window.addEventListener('message',h);window.postMessage({source:'smart-bookmark-userscript',id,action,payload},'*');setTimeout(()=>{if(!done){window.removeEventListener('message',h);resolve(null)}},timeout)})}
-async function hasCRX(){const r=await bridge('ping',{},700);return !!r?.ok}
+  function initDockButton() {
+    const fab = document.getElementById('sbu-fab');
+    if (!fab) {
+      setTimeout(initDockButton, 120);
+      return;
+    }
+    if (fab.dataset.smartDockReady === '1') return;
+    fab.dataset.smartDockReady = '1';
+    fab.classList.add('sbu-dock-managed');
 
-async function ai(){
-  const base=(GM_getValue('sb_ai_base','')||'').replace(/\/+$/,''),key=GM_getValue('sb_ai_key',''),model=GM_getValue('sb_ai_model','');if(!base||!key||!model)throw new Error('请先设置 AI API');
-  const endpoint=base.endsWith('/chat/completions')?base:base+'/chat/completions';const text=(document.body?.innerText||'').replace(/\s+/g,' ').slice(0,2800);
-  const prompt=`分析此网页并只返回JSON对象：{"category":"分类","tags":["标签"],"summary":"摘要","confidence":90}。category必须从这些分类中选：${CATS.join('、')}。标题：${document.title}；网址：${location.href}；正文：${text}`;
-  const d=await request({method:'POST',url:endpoint,headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:{model,messages:[{role:'system',content:'你是浏览器收藏分类助手，只返回合法JSON。'},{role:'user',content:prompt}],temperature:0},timeout:45000});
-  let c=String(d?.choices?.[0]?.message?.content||'').trim().replace(/^```json\s*/i,'').replace(/^```\s*/,'').replace(/\s*```$/,'');const a=c.indexOf('{'),b=c.lastIndexOf('}');if(a>=0&&b>a)c=c.slice(a,b+1);const x=JSON.parse(c);return{category:CATS.includes(x.category)?x.category:'网站与服务',tags:Array.isArray(x.tags)?x.tags.slice(0,5):[],summary:typeof x.summary==='string'?x.summary:'',confidence:Number(x.confidence)||70};
-}
-async function saveCloud(useAI=true){const s=await session();if(!s){openPanel('account');return}let x={category:'网站与服务',tags:[],summary:'',confidence:null};if(useAI){try{x=await ai()}catch(e){toast('AI失败，按普通收藏保存：'+e.message)}}await rest('bookmarks',{method:'POST',headers:{Prefer:'return=minimal'},body:{user_id:s.user.id,source_browser:'userscript',source_bookmark_id:null,title:document.title||location.href,url:location.href,description:null,summary:x.summary||null,folder_path:'',category_name:x.category,tags_json:x.tags,ai_confidence:x.confidence,classification_status:x.confidence?'confirmed':'pending',deleted_at:null}});toast('已收藏到云端 → '+x.category)}
-async function save(useAI=true){const crx=await hasCRX();if(crx){toast(useAI?'CRX 正在调用 AI…':'正在写入浏览器收藏…');const r=await bridge('save_current',{title:document.title,url:location.href,useAI},50000);if(r?.ok)toast('已收藏到浏览器 → '+(r.data?.category||'完成'));else toast('CRX 收藏失败：'+(r?.error||'无响应'));return}return saveCloud(useAI)}
-async function cloudRows(){return rest('bookmarks',{query:{select:'id,title,url,summary,tags_json,category_name,updated_at',deleted_at:'is.null',order:'updated_at.desc'}})}
-async function myRows(){const crx=await hasCRX();if(crx){const r=await bridge('list_bookmarks',{},8000);if(r?.ok)return{mode:'native',rows:r.data||[]};}const rows=await cloudRows();return{mode:'cloud',rows}}
-async function searchRows(q){const data=await myRows();const ks=String(q||'').toLowerCase().trim().split(/\s+/).filter(Boolean);if(!ks.length)return{...data,rows:data.rows.slice(0,100)};const rows=data.rows.map(x=>{const t=`${x.title||''} ${x.url||''} ${x.summary||''} ${(x.tags_json||x.tags||[]).join(' ')} ${x.category_name||x.suggestedCategory||''} ${x.path||''}`.toLowerCase();return{...x,_s:ks.reduce((n,k)=>n+(t.includes(k)?1:0),0)}}).filter(x=>x._s).sort((a,b)=>b._s-a._s).slice(0,100);return{...data,rows}}
-function toast(t){let e=$('#sbu-toast');if(!e){e=document.createElement('div');e.id='sbu-toast';document.documentElement.appendChild(e)}e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),3000)}
-function row(x,mode='native'){const cat=x.category_name||x.suggestedCategory||'';return `<div class="sbu-item" data-id="${esc(x.id)}" data-mode="${esc(mode)}"><div class="sbu-item-top"><a class="sbu-open" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title||x.url)}</a><span>${esc(cat)}</span></div><p>${esc(x.summary||x.path||'')}</p><div class="sbu-actions"><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">打开</a><button class="sbu-del" data-id="${esc(x.id)}" data-mode="${esc(mode)}">删除</button></div></div>`}
-async function deleteRow(mode,id){if(mode==='native'){const r=await bridge('delete_bookmark',{id},8000);if(!r?.ok)throw new Error(r?.error||'CRX删除失败');return}await rest('bookmarks',{method:'PATCH',query:{id:'eq.'+id},headers:{Prefer:'return=minimal'},body:{deleted_at:new Date().toISOString()}})}
-function bindRows(){document.querySelectorAll('#sbu-panel .sbu-del').forEach(b=>b.onclick=async e=>{e.preventDefault();e.stopPropagation();if(!confirm('确定删除这条收藏吗？'))return;try{b.disabled=true;await deleteRow(b.dataset.mode,b.dataset.id);b.closest('.sbu-item')?.remove();toast('已删除收藏')}catch(err){b.disabled=false;toast('删除失败：'+err.message)}})}
-function duplicateExcess(rows){const m=new Map();for(const x of rows){const k=String(x.url||'').trim().replace(/\/$/,'').toLowerCase();if(k)m.set(k,(m.get(k)||0)+1)}return [...m.values()].reduce((n,v)=>n+Math.max(0,v-1),0)}
-async function cleanDuplicates(data){if(data.mode==='native'){const r=await bridge('clean_duplicates',{},30000);if(!r?.ok)throw new Error(r?.error||'CRX清理失败');return r.data}const groups=new Map();for(const x of data.rows){const k=String(x.url||'').trim().replace(/\/$/,'').toLowerCase();if(!k)continue;if(!groups.has(k))groups.set(k,[]);groups.get(k).push(x)}let removed=0;for(const arr of groups.values()){for(const x of arr.slice(1)){await deleteRow('cloud',x.id);removed++}}return{removedLocal:removed}}
-function close(){ $('#sbu-mask')?.remove();$('#sbu-panel')?.remove() }
-function shell(){close();const mask=document.createElement('div');mask.id='sbu-mask';mask.onclick=close;const p=document.createElement('div');p.id='sbu-panel';p.innerHTML=`<div class="sbu-head"><div><b>智能收藏</b><span>Smart Bookmark</span></div><button id="sbu-close">×</button></div><div class="sbu-tabs"><button data-tab="home" class="active">收藏</button><button data-tab="mine">我的收藏</button><button data-tab="search">智能搜索</button><button data-tab="account">账号</button><button data-tab="ai">AI设置</button></div><div id="sbu-body"></div>`;document.documentElement.append(mask,p);$('#sbu-close',p).onclick=close;p.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{p.querySelectorAll('[data-tab]').forEach(x=>x.classList.remove('active'));b.classList.add('active');render(b.dataset.tab)});render('home')}
-async function render(tab){const body=$('#sbu-body');if(!body)return;body.innerHTML='<div class="sbu-loading">加载中…</div>';
-  if(tab==='home'){const crx=await hasCRX();body.innerHTML=`<div class="sbu-card"><div class="sbu-title">${esc(document.title||location.href)}</div><div class="sbu-url">${esc(location.href)}</div></div><button class="sbu-primary" id="sbu-ai-save">🤖 AI 分析并收藏</button><button class="sbu-secondary" id="sbu-save">直接收藏</button><div class="sbu-note">${crx?'✅ 已连接 CRX：会写入浏览器原生收藏夹':'☁️ 未检测到 CRX：将保存到云端收藏库'}</div>`;$('#sbu-ai-save').onclick=()=>save(true);$('#sbu-save').onclick=()=>save(false)}
-  if(tab==='mine'){try{const d=await myRows();const dup=duplicateExcess(d.rows);body.innerHTML=`<div class="sbu-section"><b>${d.mode==='native'?'浏览器原生收藏':'云端收藏'}</b><span>${d.rows.length} 条</span></div>${dup?`<div class="sbu-dup"><div><b>发现 ${dup} 条重复收藏</b><span>相同网址只保留 1 条</span></div><button id="sbu-clean">一键清理</button></div>`:''}<div class="sbu-list">${d.rows.slice(0,300).map(x=>row(x,d.mode)).join('')}</div>`;bindRows();const cl=$('#sbu-clean');if(cl)cl.onclick=async()=>{if(!confirm(`确定删除 ${dup} 条重复收藏吗？`))return;try{cl.disabled=true;cl.textContent='清理中…';const r=await cleanDuplicates(d);toast(`已删除 ${r?.removedLocal||0} 条重复收藏`);render('mine')}catch(e){cl.disabled=false;cl.textContent='一键清理';toast('清理失败：'+e.message)}}}catch(e){body.innerHTML=`<div class="sbu-error">${esc(e.message)}</div>`}}
-  if(tab==='search'){body.innerHTML=`<div class="sbu-search"><input id="sbu-q" placeholder="例如：OpenWrt 温度教程"><button id="sbu-go">搜索</button></div><div id="sbu-results"></div>`;$('#sbu-go').onclick=async()=>{const b=$('#sbu-results');b.innerHTML='<div class="sbu-loading">搜索中…</div>';try{const d=await searchRows($('#sbu-q').value);b.innerHTML=`<div class="sbu-note">${d.mode==='native'?'搜索浏览器原生收藏':'搜索云端收藏'}</div><div class="sbu-list">${d.rows.map(x=>row(x,d.mode)).join('')}</div>`;bindRows()}catch(e){b.innerHTML=`<div class="sbu-error">${esc(e.message)}</div>`}}}
-  if(tab==='account'){const s=await session();if(s){body.innerHTML=`<div class="sbu-card"><div class="sbu-note">当前账号</div><div class="sbu-title">${esc(s.user?.email||'')}</div></div><button class="sbu-danger" id="sbu-out">退出登录</button>`;$('#sbu-out').onclick=()=>{GM_deleteValue('sb_session');render('account')}}else{body.innerHTML=`<input class="sbu-input" id="sbu-email" placeholder="邮箱"><input class="sbu-input" id="sbu-pass" type="password" placeholder="密码"><div class="sbu-row"><button class="sbu-primary" id="sbu-login">登录</button><button class="sbu-secondary" id="sbu-reg">注册</button></div><div id="sbu-msg" class="sbu-note"></div>`;$('#sbu-login').onclick=async()=>{const m=$('#sbu-msg');m.textContent='登录中…';try{await login($('#sbu-email').value.trim(),$('#sbu-pass').value);render('account')}catch(e){m.textContent='登录失败：'+e.message}};$('#sbu-reg').onclick=async()=>{const m=$('#sbu-msg');try{const d=await register($('#sbu-email').value.trim(),$('#sbu-pass').value);m.textContent=d?.access_token?'注册成功':'注册成功，请先去邮箱确认'}catch(e){m.textContent='注册失败：'+e.message}}}}
-  if(tab==='ai'){const crx=await hasCRX();body.innerHTML=`<label class="sbu-label">API地址<input class="sbu-input" id="sbu-base" value="${esc(GM_getValue('sb_ai_base','https://api.openai.com/v1'))}"></label><label class="sbu-label">API Key<input class="sbu-input" id="sbu-key" type="password" value="${esc(GM_getValue('sb_ai_key',''))}"></label><label class="sbu-label">模型名<input class="sbu-input" id="sbu-model" value="${esc(GM_getValue('sb_ai_model',''))}"></label><button class="sbu-primary" id="sbu-ai-set">保存脚本 AI 设置</button><div class="sbu-note">${crx?'已检测到 CRX：原生收藏时优先使用 CRX 里的 AI 设置。':'脚本 API Key 只保存在当前浏览器。'}</div>`;$('#sbu-ai-set').onclick=()=>{GM_setValue('sb_ai_base',$('#sbu-base').value.trim());GM_setValue('sb_ai_key',$('#sbu-key').value.trim());GM_setValue('sb_ai_model',$('#sbu-model').value.trim());toast('AI设置已保存')}}
-}
+    const originalClick = fab.onclick;
+    fab.onclick = null;
 
-const style=document.createElement('style');style.textContent=`#sbu-fab{position:fixed!important;right:16px!important;bottom:16px!important;z-index:2147483644!important;width:50px!important;height:50px!important;border:0!important;border-radius:50%!important;background:#111827!important;color:#fff!important;font-size:22px!important;box-shadow:0 8px 24px #0004!important}#sbu-mask{position:fixed;inset:0;background:#0006;z-index:2147483646}#sbu-panel{position:fixed;right:12px;top:12px;bottom:12px;width:min(430px,calc(100vw - 24px));z-index:2147483647;background:#fff;color:#111827;border-radius:18px;box-shadow:0 22px 70px #0006;overflow:auto;font:14px/1.45 system-ui}.sbu-head{display:flex;justify-content:space-between;align-items:center;padding:18px 18px 10px}.sbu-head b{font-size:22px}.sbu-head span{display:block;font-size:12px;color:#6b7280}.sbu-head button{border:0;background:#f3f4f6;border-radius:9px;font-size:24px;width:38px;height:38px}.sbu-tabs{display:flex;gap:6px;overflow:auto;padding:8px 14px;border-bottom:1px solid #eee}.sbu-tabs button{white-space:nowrap;border:0;background:#eef2ff;color:#3730a3;border-radius:9px;padding:9px 11px;font-weight:700}.sbu-tabs button.active{background:#111827;color:#fff}#sbu-body{padding:16px}.sbu-card{padding:14px;background:#f9fafb;border-radius:12px;margin-bottom:12px}.sbu-title{font-size:16px;font-weight:800;word-break:break-word}.sbu-url{font-size:12px;color:#6b7280;word-break:break-all;margin-top:5px}.sbu-primary,.sbu-secondary,.sbu-danger{width:100%;border:0;border-radius:10px;padding:12px 14px;font-weight:800;margin:5px 0}.sbu-primary{background:#111827;color:#fff}.sbu-secondary{background:#eef2ff;color:#3730a3}.sbu-danger{background:#fee2e2;color:#b91c1c}.sbu-note{font-size:12px;color:#6b7280;margin-top:10px}.sbu-section{display:flex;justify-content:space-between;margin-bottom:10px}.sbu-list{display:flex;flex-direction:column}.sbu-item{padding:11px 2px;border-bottom:1px solid #eee;cursor:pointer}.sbu-item div{display:flex;justify-content:space-between;gap:8px}.sbu-item b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72%}.sbu-item span{font-size:11px;color:#4f46e5;background:#eef2ff;border-radius:999px;padding:2px 7px;white-space:nowrap}.sbu-item p{margin:4px 0 0;color:#6b7280;font-size:12px}.sbu-search{display:flex;gap:7px}.sbu-search input,.sbu-input{box-sizing:border-box;width:100%;border:1px solid #d1d5db;border-radius:10px;padding:11px 12px;font:14px system-ui}.sbu-search button{border:0;border-radius:10px;background:#111827;color:#fff;padding:0 16px;font-weight:800}.sbu-label{display:block;font-weight:700;margin:10px 0}.sbu-label input{margin-top:6px}.sbu-row{display:flex;gap:8px}.sbu-row>*{flex:1}.sbu-loading{padding:30px;text-align:center;color:#6b7280}.sbu-error{padding:12px;background:#fff1f2;color:#be123c;border-radius:10px}#sbu-toast{position:fixed;right:18px;bottom:78px;z-index:2147483647;background:#111827;color:#fff;padding:12px 16px;border-radius:10px;box-shadow:0 8px 30px #0005;font:14px system-ui;opacity:0;transform:translateY(8px);pointer-events:none;transition:.2s}#sbu-toast.show{opacity:1;transform:none}.sbu-item{cursor:default!important}.sbu-item-top{align-items:center}.sbu-open{font-weight:800;color:#111827;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72%}.sbu-actions{display:flex!important;justify-content:flex-end!important;gap:8px!important;margin-top:7px}.sbu-actions a,.sbu-actions button{border:0;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:700;text-decoration:none}.sbu-actions a{background:#eef2ff;color:#3730a3}.sbu-actions button{background:#fee2e2;color:#b91c1c}.sbu-dup{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px;margin-bottom:12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:12px}.sbu-dup>div{display:flex;flex-direction:column}.sbu-dup span{font-size:11px;color:#9a3412}.sbu-dup button{border:0;border-radius:9px;background:#ea580c;color:#fff;font-weight:800;padding:9px 12px}@media(max-width:600px){#sbu-panel{left:8px;right:8px;top:8px;bottom:8px;width:auto}}`;document.documentElement.appendChild(style);
-const fab=document.createElement('button');fab.id='sbu-fab';fab.textContent='★';fab.title='智能收藏脚本';fab.onclick=()=>{$('#sbu-panel')?close():shell()};document.documentElement.appendChild(fab);
-GM_registerMenuCommand('打开智能收藏',()=>shell());GM_registerMenuCommand('AI分析并收藏当前页',()=>save(true).catch(e=>toast(e.message)));GM_registerMenuCommand('我的收藏',()=>{shell();setTimeout(()=>render('mine'),50)});GM_registerMenuCommand('智能搜索',()=>{shell();setTimeout(()=>render('search'),50)});
+    const style = document.createElement('style');
+    style.textContent = `
+      #sbu-fab.sbu-dock-managed {
+        right:auto!important;
+        bottom:auto!important;
+        touch-action:none!important;
+        user-select:none!important;
+        -webkit-user-select:none!important;
+        cursor:grab!important;
+        transition:transform .22s ease,opacity .22s ease,box-shadow .18s ease!important;
+        will-change:left,top,transform!important;
+      }
+      #sbu-fab.sbu-dock-managed.sbu-dragging {
+        transition:none!important;
+        transform:none!important;
+        opacity:1!important;
+        cursor:grabbing!important;
+      }
+      #sbu-fab.sbu-dock-managed.sbu-idle-left {
+        transform:translateX(-24px)!important;
+        opacity:.68!important;
+      }
+      #sbu-fab.sbu-dock-managed.sbu-idle-right {
+        transform:translateX(24px)!important;
+        opacity:.68!important;
+      }
+      #sbu-fab.sbu-dock-managed:active { opacity:1!important; }
+    `;
+    document.documentElement.appendChild(style);
+
+    let saved = GM_getValue(POS_KEY, null);
+    if (typeof saved === 'string') {
+      try { saved = JSON.parse(saved); } catch { saved = null; }
+    }
+
+    let side = saved?.side === 'left' ? 'left' : 'right';
+    let y = Number(saved?.y);
+    if (!Number.isFinite(y)) y = Math.max(12, window.innerHeight - 82);
+
+    let dragging = false;
+    let moved = false;
+    let startX = 0;
+    let startY = 0;
+    let originX = 0;
+    let originY = 0;
+    let idleTimer = null;
+    let skipClick = false;
+
+    const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
+
+    function clearIdle() {
+      clearTimeout(idleTimer);
+      fab.classList.remove('sbu-idle-left', 'sbu-idle-right');
+    }
+
+    function scheduleIdle() {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        if (dragging || document.getElementById('sbu-panel')) return;
+        fab.classList.remove('sbu-idle-left', 'sbu-idle-right');
+        fab.classList.add(side === 'left' ? 'sbu-idle-left' : 'sbu-idle-right');
+      }, IDLE_MS);
+    }
+
+    function place(save = false) {
+      const size = 50;
+      const maxY = Math.max(8, window.innerHeight - size - 8);
+      y = clamp(y, 8, maxY);
+      const x = side === 'left' ? 0 : Math.max(0, window.innerWidth - size);
+      fab.style.setProperty('left', `${x}px`, 'important');
+      fab.style.setProperty('top', `${y}px`, 'important');
+      fab.style.setProperty('right', 'auto', 'important');
+      fab.style.setProperty('bottom', 'auto', 'important');
+      if (save) GM_setValue(POS_KEY, { side, y });
+    }
+
+    function onDown(e) {
+      if (e.button != null && e.button !== 0) return;
+      clearIdle();
+      dragging = true;
+      moved = false;
+      fab.classList.add('sbu-dragging');
+      startX = e.clientX;
+      startY = e.clientY;
+      const r = fab.getBoundingClientRect();
+      originX = r.left;
+      originY = r.top;
+      try { fab.setPointerCapture?.(e.pointerId); } catch {}
+      e.preventDefault();
+    }
+
+    function onMove(e) {
+      if (!dragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
+      const size = 50;
+      const x = clamp(originX + dx, 0, Math.max(0, window.innerWidth - size));
+      y = clamp(originY + dy, 8, Math.max(8, window.innerHeight - size - 8));
+      fab.style.setProperty('left', `${x}px`, 'important');
+      fab.style.setProperty('top', `${y}px`, 'important');
+      e.preventDefault();
+    }
+
+    function onUp(e) {
+      if (!dragging) return;
+      dragging = false;
+      fab.classList.remove('sbu-dragging');
+      const r = fab.getBoundingClientRect();
+      side = (r.left + r.width / 2) < window.innerWidth / 2 ? 'left' : 'right';
+      y = r.top;
+      place(true);
+      try { fab.releasePointerCapture?.(e.pointerId); } catch {}
+      if (moved) {
+        skipClick = true;
+        setTimeout(() => { skipClick = false; }, 120);
+      }
+      scheduleIdle();
+    }
+
+    fab.addEventListener('pointerdown', onDown, { passive: false });
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp, { passive: false });
+    window.addEventListener('pointercancel', onUp, { passive: false });
+
+    fab.addEventListener('click', (e) => {
+      if (skipClick) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      clearIdle();
+      if (typeof originalClick === 'function') originalClick.call(fab, e);
+      scheduleIdle();
+    });
+
+    window.addEventListener('resize', () => {
+      place(false);
+      scheduleIdle();
+    });
+
+    const observer = new MutationObserver(() => {
+      if (document.getElementById('sbu-panel')) clearIdle();
+      else scheduleIdle();
+    });
+    observer.observe(document.documentElement, { childList: true });
+
+    place(false);
+    scheduleIdle();
+  }
+
+  initDockButton();
 })();
